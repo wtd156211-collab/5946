@@ -1,0 +1,14 @@
+{
+  "dataset": "customer-orders",
+  "columns": [
+    { "name": "customer_id", "type": "string", "mask": "keep", "note": "两份文件之间的引用键，原样保留" },
+    { "name": "order_id", "type": "string", "mask": "keep", "note": "订单号，原样保留" },
+    { "name": "name", "type": "cn_name", "mask": "valid-fake", "note": "中文姓名，允许重名" },
+    { "name": "phone", "type": "cn_mobile", "mask": "valid-fake", "note": "11 位手机号，1 开头、第二位 3-9" },
+    { "name": "email", "type": "email", "mask": "valid-fake", "note": "仍是合法邮箱地址" },
+    { "name": "bank_card", "type": "pan", "mask": "valid-fake", "note": "16 位卡号，必须过 Luhn 校验" },
+    { "name": "id_card", "type": "cn_id", "mask": "valid-fake", "note": "18 位身份证，校验位正确、出生日期真实存在" },
+    { "name": "order_date", "type": "date", "mask": "shift", "note": "日期位移，先后顺序不能变" },
+    { "name": "order_amount", "type": "decimal_cny", "mask": "jitter", "note": "金额小幅扰动，量级不变，两位小数" }
+  ]
+}
