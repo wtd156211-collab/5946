@@ -21,6 +21,61 @@ samples/ 下有三份材料：`export-batch-1.csv` 与 `export-batch-2.csv` 是�
 
 两份样例里的手机号、卡号、身份证都是按上面规则生成的合法值，可以直接拿来检查校验位。
 
-## 待补的文档
+## 用法
 
-实现完成后把这三件事写在这里：列规则的实际处理方式、映射是怎么算出来的（密钥在其中的作用）、还原清单的格式与存放位置，以及它为什么不直接泄露原值。
+```bash
+# 1. 生成密钥（32 字节随机数，hex 保存，文件权限 0600）
+PYTHONPATH=. python3 -m masktool genkey --out key.hex
+
+# 2. 脱敏（逐行流式处理，内存不随行数增长；清单文件跨批次复用、持续累积）
+PYTHONPATH=. python3 -m masktool mask \
+    --key key.hex --columns samples/columns.json \
+    --manifest manifest.sqlite3 export-batch-1.csv masked-1.csv
+
+# 3. 还原（需要同一把密钥和同一份清单，输出与原文件逐字节一致）
+PYTHONPATH=. python3 -m masktool restore \
+    --key key.hex --columns samples/columns.json \
+    --manifest manifest.sqlite3 masked-1.csv restored-1.csv
+```
+
+输入仅支持简单 CSV（字段内不含逗号、引号、换行），行尾与未脱敏列逐字节保留。
+代码在 `masktool/`（`core.py` 映射与清单、`validators.py` 校验、`__main__.py` CLI），
+测试在 `tests/`，运行 `python3 -m unittest discover -s tests`。
+
+## 列规则的实际处理
+
+| mask | 处理方式 |
+|---|---|
+| `keep` | 原样透传，不进入映射，引用键与订单号因此天然不断 |
+| `valid-fake` | 由密钥派生的伪随机流生成同类型合法假值：中文姓名（常见姓氏+名字用字）、手机号（`1`+`3-9`+9 位）、邮箱（假本地部分+保留原域名）、卡号（`62` 开头 16 位、Luhn 校验位重算）、身份证（真实行政区划码+真实存在的出生日期+GB 11643 校验位） |
+| `shift` | 全部日期加上同一个由密钥派生的天数（±3650 内、非零），先后顺序不变，位移后仍是真实日期 |
+| `jitter` | 金额乘以 `1 ± 10%` 内的密钥派生系数，四舍五入到两位小数，量级不变；同一原值扰动结果相同 |
+
+## 映射是怎么算的
+
+每个待脱敏值的结果由 `HMAC-SHA256(key, purpose | 列类型 | 原值 | 计数器)` 派生的伪随机字节流生成：
+
+- **确定性**：同一密钥下，同一原值在任何列、任何文件、任何批次都算出同一结果，跨文件一致性不依赖运行状态。
+- **密钥相关**：密钥是 HMAC 的唯一密钥，换一把密钥整套映射全部改变（有测试逐字段验证），不是固定偏移。
+- **无碰撞**：不同原值若生成同一候选值，计数器加一重试，直到候选值在还原清单中没有冲突为止；清单以 `(列类型, 脱敏值)` 为主键，从机制上保证按列唯一，本来唯一的列脱敏后仍唯一。
+- **恒等保护**：候选值等于原值时同样重试，不会出现"脱敏后还是原值"。
+
+## 还原清单：格式、存放与保密性
+
+清单是单个 SQLite 文件（默认 `manifest.sqlite3`），两张表：
+
+```sql
+CREATE TABLE entries (
+  col_type TEXT NOT NULL,   -- 列类型，如 cn_mobile
+  masked   TEXT NOT NULL,   -- 脱敏后的值，还原时按它反查
+  tag      TEXT NOT NULL,   -- HMAC(key, "tag"|col_type|原值) 的 hex
+  enc      BLOB NOT NULL,   -- 原值 UTF-8 与密钥流异或后的密文
+  PRIMARY KEY (col_type, masked)
+);
+CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);  -- 存日期位移天数等全局参数
+```
+
+- **存什么**：每个"原值 → 脱敏值"映射一行，只存脱敏值、原值的 keyed 哈希和原值的密文，**不存原值明文**。
+- **放哪**：与密钥一起留在内部（如密钥管理系统或受控目录），**只把脱敏后的 CSV 给外部**；所有批次共用同一份清单才能保证跨批次一致。清单落盘存储、逐行提交，处理两千万行时内存占用与行数无关。
+- **为什么不泄露原值**：`tag` 是没有密钥就无法逆推也无法验证猜测的 HMAC；`enc` 是原值与 `HMAC(key, "enc"|tag|块号)` 派生密钥流异或的密文。没有密钥，清单里只有随机-looking 的哈希和密文；有密钥才能解密还原。注意清单与密钥必须同等保护——两者齐备即可还原全部原值。
+- **还原**：`restore` 按脱敏值查 `entries`，用密钥重建密钥流异或解密，逐字段写回；未脱敏列与行尾从未被改动，因此输出与原文件逐字节一致（有测试保证）。
